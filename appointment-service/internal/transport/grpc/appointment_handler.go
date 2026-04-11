@@ -74,9 +74,10 @@ func mapAppointmentError(err error, fallbackMessage string) error {
 	case errors.Is(err, usecase.ErrTitleRequired),
 		errors.Is(err, usecase.ErrDoctorIDRequired),
 		errors.Is(err, usecase.ErrInvalidStatus),
-		errors.Is(err, usecase.ErrInvalidStatusTransition),
-		errors.Is(err, usecase.ErrDoctorNotFound):
+		errors.Is(err, usecase.ErrInvalidStatusTransition):
 		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, usecase.ErrDoctorNotFound):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, usecase.ErrAppointmentNotFound):
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, usecase.ErrDoctorServiceUnavailable):

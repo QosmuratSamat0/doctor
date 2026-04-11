@@ -1,11 +1,11 @@
 # Medical Scheduling Platform
 
-This project implements a small two-service medical scheduling platform in Go using Clean Architecture and HTTP/gRPC microservices.
+This project implements a two-service medical scheduling platform in Go using Clean Architecture and gRPC microservices.
 
 The system is split into:
 
-- `doctor-service`: owns doctor profile data.
-- `appointment-service`: owns appointment data and validates doctor existence through the Doctor Service over gRPC.
+- doctor-service: owns doctor profile data.
+- appointment-service: owns appointment data and validates doctor existence through Doctor Service over gRPC.
 
 ## Project Overview
 
@@ -16,51 +16,48 @@ The platform demonstrates:
 - synchronous gRPC communication between services;
 - basic failure handling when one service depends on another over the network.
 
-Each service keeps business rules in the use case layer, persistence in the repository layer, and transport-specific logic in thin handlers.
+Each service keeps business rules in the use case layer, persistence in the repository layer, and transport-specific logic in thin gRPC handlers.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    Client --> DS[Doctor Service<br/>Gin REST API]
-    Client --> AS[Appointment Service<br/>Gin REST API]
-    DS --> DDB[(Doctor Repository<br/>owned by doctor-service)]
-    AS --> ADB[(Appointment Repository<br/>owned by appointment-service)]
-    AS -->|GetDoctor RPC| DS
+    C[Client: Postman or grpcurl]
+    C -->|gRPC :9091| DS[Doctor Service\nDoctorService RPCs]
+    C -->|gRPC :9092| AS[Appointment Service\nAppointmentService RPCs]
+    DS --> DDB[(Doctor Repository\nowned by doctor-service)]
+    AS --> ADB[(Appointment Repository\nowned by appointment-service)]
+    AS -->|GetDoctor RPC\nlocalhost:9091| DS
 ```
 
 ## Service Responsibilities
 
-### Doctor Service
+### Doctor Service RPCs
 
-Owns doctor profile data and exposes:
-
-- `POST /doctors`
-- `GET /doctors/:id`
-- `GET /doctors`
+- CreateDoctor
+- GetDoctor
+- ListDoctors
 
 Rules:
 
-- `full_name` is required.
-- `email` is required.
-- `email` must be unique.
+- full_name is required.
+- email is required.
+- email must be unique.
 
-### Appointment Service
+### Appointment Service RPCs
 
-Owns appointment data and exposes:
-
-- `POST /appointments`
-- `GET /appointments/:id`
-- `GET /appointments`
-- `PATCH /appointments/:id/status`
+- CreateAppointment
+- GetAppointment
+- ListAppointments
+- UpdateAppointmentStatus
 
 Rules:
 
-- `title` is required.
-- `doctor_id` is required.
-- the doctor must exist in the Doctor Service;
-- `status` must be `new`, `in_progress`, or `done`;
-- transition from `done` back to `new` is rejected.
+- title is required.
+- doctor_id is required.
+- the doctor must exist in Doctor Service;
+- status must be new, in_progress, or done;
+- transition from done back to new is rejected.
 
 ## Folder Structure And Dependency Flow
 
@@ -70,11 +67,11 @@ Each service follows the same shape:
 service/
 ├── cmd/service-name/main.go
 └── internal/
-    ├── app/            # application wiring
-    ├── model/          # domain entities
-    ├── repository/     # persistence implementation
-    ├── transport/http/ # Gin handlers and DTOs
-    └── usecase/        # business logic and interfaces
+    ├── app/             # application wiring
+    ├── model/           # domain entities
+    ├── repository/      # persistence implementation
+    ├── transport/grpc/  # gRPC handlers and mapping
+    └── usecase/         # business logic and interfaces
 ```
 
 Dependency direction points inward:
@@ -82,158 +79,223 @@ Dependency direction points inward:
 - handlers depend on use cases;
 - use cases depend on interfaces;
 - repositories implement repository interfaces;
-- outbound transport clients implement use case interfaces;
-- domain models do not depend on Gin or transport concerns.
+- outbound gRPC clients implement use case interfaces;
+- domain models do not depend on transport concerns.
 
 ## Inter-Service Communication
 
-The Appointment Service calls the Doctor Service over gRPC using:
-
-- `GetDoctor`
-
-It performs this validation before:
+Appointment Service calls Doctor Service over gRPC with GetDoctor before:
 
 - creating an appointment;
 - updating appointment status.
 
-The Appointment Service never accesses Doctor Service storage directly. This explicit RPC boundary is what keeps the services decoupled at the data layer and prevents a shared-database design.
-
-## Why This Is Microservices Instead Of A Distributed Monolith
-
-This design qualifies as microservices because:
-
-- each service has its own responsibility and owned data;
-- cross-service interaction happens only through a published gRPC API;
-- the Appointment Service depends on a contract, not Doctor Service internals;
-- the services can be started, changed, and evolved independently.
-
-It would become a distributed monolith if the services shared one database, reached into each other's repositories, or embedded business rules across process boundaries.
-
-## Why A Shared Database Was Not Used
-
-A shared database would break service ownership and tightly couple both bounded contexts. Instead, each service owns its own repository implementation, and doctor validation crosses the boundary only through a gRPC call. This preserves autonomy and makes the boundary explicit.
+Appointment Service never accesses Doctor Service storage directly. This explicit RPC boundary keeps services decoupled at the data layer.
 
 ## Failure Scenario
 
-If the Doctor Service is unavailable when the Appointment Service tries to create or update an appointment:
+If Doctor Service is unavailable when Appointment Service tries to create or update an appointment:
 
 - the operation is rejected;
-- the Appointment Service logs the verification failure internally;
-- the API responds with `503 Service Unavailable` and a descriptive error message.
+- Appointment Service logs verification failure internally;
+- gRPC returns Unavailable with a descriptive message.
 
 Current resilience is intentionally basic for the assignment:
 
-- a 2-second timeout is configured on the outbound gRPC client;
+- a 2-second timeout is configured on outbound gRPC client;
 - no retry policy is applied;
 - no circuit breaker is implemented.
 
-In a production system, retries might help with transient network issues, a circuit breaker would protect the Appointment Service from repeated downstream failures, and richer observability would be added around latency and error rates.
+## REST vs gRPC Trade-Offs
+
+1. Contract strictness and type safety
+   - gRPC uses proto schemas and generated types, reducing request-shape drift.
+   - REST with JSON is more flexible but easier to break without strict validation.
+   - Choose gRPC for strongly typed internal service-to-service APIs.
+
+2. Performance and payload format
+   - gRPC uses protobuf (binary), usually smaller and faster than JSON in REST.
+   - REST is simpler to inspect manually and easier for public browser-facing APIs.
+   - Choose gRPC for low-latency internal calls and high-throughput paths.
+
+3. Streaming and bidirectional communication
+   - gRPC natively supports client/server/bidirectional streaming.
+   - REST usually needs extra protocols (SSE/WebSocket) for real-time patterns.
+   - Choose gRPC when your use case needs streaming semantics.
+
+4. Tooling and interoperability
+   - REST is universally accessible with plain HTTP tooling.
+   - gRPC requires proto-aware tooling (Postman gRPC mode, grpcurl, generated clients).
+   - Choose REST for broad external integrations, gRPC for controlled internal ecosystems.
+
+## Prerequisites
+
+- Go 1.24+
+- protoc compiler
+- protoc-gen-go plugin
+- protoc-gen-go-grpc plugin
+
+### Install protoc and plugins
+
+Windows (example with winget):
+
+```powershell
+winget install ProtocolBuffers.Protobuf
+go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+```
+
+Linux/macOS:
+
+```bash
+# install protoc with your package manager first
+go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+```
+
+Ensure Go bin is in PATH so protoc can find plugins.
+
+## Regenerate gRPC Stubs
+
+From repository root:
+
+```bash
+make proto-doctor
+make proto-appointment
+```
+
+Or run protoc commands directly from each service folder as defined in Makefile.
 
 ## How To Run
 
-### 1. Install dependencies
+### 1. Install service dependencies
 
-From the repository root:
+From repository root:
 
 ```bash
 cd doctor-service && go mod tidy
 cd ../appointment-service && go mod tidy
 ```
 
-To run tests from the repository root, use:
-
-```bash
-make test
-```
-
-`go test ./...` at the repository root only tests the root launcher module. If you want to run service tests manually without `make`, use:
-
-```bash
-cd doctor-service && go test ./...
-cd ../appointment-service && go test ./...
-```
-
-### 2. Start the Doctor Service
+### 2. Start Doctor Service (gRPC)
 
 ```bash
 cd doctor-service
 go run ./cmd/doctor-service
 ```
 
-The Doctor Service runs on `http://localhost:8081`.
+Doctor Service gRPC listens on localhost:9091.
 
-### 3. Start the Appointment Service
+### 3. Start Appointment Service (gRPC)
 
 In another terminal:
+
+Linux/macOS:
 
 ```bash
 cd appointment-service
 DOCTOR_SERVICE_ADDR=localhost:9091 go run ./cmd/appointment-service
 ```
 
-The Appointment Service runs on `http://localhost:8082`.
+PowerShell:
 
-### Optional: start both services from the repository root
+```powershell
+cd appointment-service
+$env:DOCTOR_SERVICE_ADDR = "localhost:9091"
+go run ./cmd/appointment-service
+```
+
+Appointment Service gRPC listens on localhost:9092.
+
+### Optional: start both services from repository root
 
 ```bash
 go run .
 ```
 
-This launches both services as child processes:
+This launches:
 
-- Doctor Service on `http://localhost:8081`
-- Appointment Service on `http://localhost:8082`
+- Doctor Service gRPC on localhost:9091
+- Appointment Service gRPC on localhost:9092
 
-## API Examples
+## gRPC Testing Artifact (grpcurl)
 
-### Create a doctor
+These commands demonstrate all RPCs required by the assignment.
+
+### Doctor Service
+
+CreateDoctor:
 
 ```bash
-curl -X POST http://localhost:8081/doctors \
-  -H "Content-Type: application/json" \
-  -d '{
-    "full_name": "Dr. Aisha Seitkali",
-    "specialization": "Cardiology",
-    "email": "a.seitkali@clinic.kz"
-  }'
+grpcurl -plaintext \
+  -import-path doctor-service/proto \
+  -proto doctor.proto \
+  -d '{"full_name":"Dr. Aisha Seitkali","specialization":"Cardiology","email":"a.seitkali@clinic.kz"}' \
+  localhost:9091 doctor.DoctorService/CreateDoctor
 ```
 
-### List doctors
+GetDoctor:
 
 ```bash
-curl http://localhost:8081/doctors
+grpcurl -plaintext \
+  -import-path doctor-service/proto \
+  -proto doctor.proto \
+  -d '{"id":"doctor-1"}' \
+  localhost:9091 doctor.DoctorService/GetDoctor
 ```
 
-### Create an appointment
+ListDoctors:
 
 ```bash
-curl -X POST http://localhost:8082/appointments \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Initial cardiac consultation",
-    "description": "Patient referred for palpitations and shortness of breath",
-    "doctor_id": "doctor-1"
-  }'
+grpcurl -plaintext \
+  -import-path doctor-service/proto \
+  -proto doctor.proto \
+  -d '{}' \
+  localhost:9091 doctor.DoctorService/ListDoctors
 ```
 
-### List appointments
+### Appointment Service
+
+CreateAppointment:
 
 ```bash
-curl http://localhost:8082/appointments
+grpcurl -plaintext \
+  -import-path appointment-service/proto \
+  -proto appointment.proto \
+  -d '{"title":"Initial cardiac consultation","description":"Patient referred for palpitations","doctor_id":"doctor-1"}' \
+  localhost:9092 appointment.AppointmentService/CreateAppointment
 ```
 
-### Update appointment status
+GetAppointment:
 
 ```bash
-curl -X PATCH http://localhost:8082/appointments/appointment-1/status \
-  -H "Content-Type: application/json" \
-  -d '{
-    "status": "in_progress"
-  }'
+grpcurl -plaintext \
+  -import-path appointment-service/proto \
+  -proto appointment.proto \
+  -d '{"id":"appointment-1"}' \
+  localhost:9092 appointment.AppointmentService/GetAppointment
+```
+
+ListAppointments:
+
+```bash
+grpcurl -plaintext \
+  -import-path appointment-service/proto \
+  -proto appointment.proto \
+  -d '{}' \
+  localhost:9092 appointment.AppointmentService/ListAppointments
+```
+
+UpdateAppointmentStatus:
+
+```bash
+grpcurl -plaintext \
+  -import-path appointment-service/proto \
+  -proto appointment.proto \
+  -d '{"id":"appointment-1","status":"in_progress"}' \
+  localhost:9092 appointment.AppointmentService/UpdateAppointmentStatus
 ```
 
 ## Notes
 
-- Both services currently use in-memory repositories to keep the assignment focused on architecture and service boundaries.
-- The in-memory data is reset on restart.
->>>>>>> 31d306b (first commit)
+- Both services currently use in-memory repositories to keep focus on architecture and service boundaries.
+- In-memory data is reset on restart.
