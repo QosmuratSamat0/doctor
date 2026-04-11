@@ -31,7 +31,7 @@ func main() {
 			"appointment-service",
 			"appointment-service",
 			[]string{"go", "run", "./cmd/appointment-service"},
-			[]string{"DOCTOR_SERVICE_URL=http://localhost:8081"},
+			[]string{"DOCTOR_SERVICE_ADDR=localhost:9091"},
 		),
 	}
 
