@@ -95,7 +95,9 @@ func (u *appointmentUsecase) Create(ctx context.Context, input CreateAppointment
 		UpdatedAt:   now,
 	}
 
-	created, err := u.repo.Create(ctx, appointment)
+	created, err := u.repo.WithTx(ctx, func(repo AppointmentRepository) (model.Appointment, error) {
+		return repo.Create(ctx, appointment)
+	})
 	if err == nil && u.publisher != nil {
 		_ = u.publisher.Publish(ctx, "appointments.created", AppointmentCreatedEvent{
 			EventType:  "appointments.created",

@@ -216,6 +216,139 @@ If Notification Service loses connection to NATS:
 - events published during disconnection are not replayed (fire-and-forget model);
 - the service logs connection failures for debugging.
 
+## Consistency Trade-offs and Design Decisions
+
+### Fire-and-Forget Event Delivery (Current Implementation)
+
+This implementation prioritizes **availability and performance** over guaranteed delivery:
+
+- **No persistent queue**: Events published to NATS are not persisted to disk. If the broker crashes, in-flight events are lost.
+- **No acknowledgements**: Services do not wait for Notification Service to confirm event processing before returning success to clients.
+- **Best-effort delivery**: The core business operation (create doctor, update appointment) succeeds regardless of whether event publishing succeeds.
+
+**When this is acceptable:**
+- Notifications are informational and loss is tolerable (e.g., audit logging, metrics).
+- The platform prioritizes low latency and high availability.
+
+### Alternative Approaches (Not Implemented)
+
+#### 1. **Outbox Pattern**
+- Store events in a local transaction alongside the entity change (e.g., in `doctors_events` table).
+- A separate **Outbox Poller** process reads and publishes events to the broker.
+- Guarantees: Events are never lost (persisted locally) and exactly-once delivery is easier to achieve.
+- Trade-off: Adds complexity (poller process, cleanup jobs), higher database load.
+
+#### 2. **NATS JetStream**
+- Enable NATS JetStream for persistent, replicated event streams.
+- Services publish to JetStream subjects instead of core NATS subjects.
+- Notification Service consumes via durable consumer groups with acknowledgement.
+- Guarantees: Events are persisted and replayed on re-subscription.
+- Trade-off: Increases broker resource requirements and protocol complexity.
+
+#### 3. **RabbitMQ with Durable Queues**
+- Use RabbitMQ exchanges and queues with `durable=true` and `auto-ack=false`.
+- Explicit acknowledgements ensure messages are not lost.
+- Guarantees: Messages persist to disk; no loss on broker restart.
+- Trade-off: Heavier operational footprint; higher latency compared to NATS.
+
+### Broker Comparison: NATS vs RabbitMQ
+
+| Aspect | NATS | RabbitMQ |
+|--------|------|----------|
+| **Protocol** | Simple binary (fast) | AMQP (feature-rich) |
+| **Message Persistence** | Optional (JetStream) | Built-in (queues) |
+| **Delivery Guarantee** | At-most-once (core) | At-least-once (explicit acks) |
+| **Latency** | Sub-millisecond | Low but higher than NATS |
+| **Resource Usage** | Minimal (single binary) | Moderate (Erlang VM) |
+| **Learning Curve** | Simple pub/sub model | Complex routing and bindings |
+| **Operational Overhead** | Very low | Moderate (queue management) |
+| **Production Readiness** | High (for fire-and-forget) | High (for guaranteed delivery) |
+
+For this assignment, NATS was chosen because:
+- Simple pub/sub model aligns with microservice event broadcasting.
+- Low operational overhead for a teaching project.
+- Fire-and-forget semantics are appropriate for notification use cases.
+
+## Database Migrations
+
+Migrations are automatically applied during service startup (before gRPC server initialization). The system uses `golang-migrate` with file-based migrations stored in `migrations/` folders.
+
+### Automatic Migration on Startup
+
+When you run `docker compose up -d` or start services locally:
+
+1. Each service (doctor, appointment) connects to its database.
+2. Migrations from the `migrations/` folder are discovered and executed in order.
+3. Only new (unapplied) migrations run; previously applied migrations are skipped.
+4. If migration fails, the service exits with an error.
+
+Migration files follow the naming convention:
+```
+{VERSION}_{DESCRIPTION}.up.sql     (apply migration)
+{VERSION}_{DESCRIPTION}.down.sql   (revert migration)
+```
+
+### Manual Migration Management
+
+If you need to manually apply or revert migrations outside of service startup:
+
+#### Using golang-migrate CLI
+
+Install golang-migrate:
+
+```bash
+# macOS
+brew install golang-migrate
+
+# Linux
+curl -L https://github.com/golang-migrate/migrate/releases/download/v4.16.2/migrate.linux-amd64.tar.gz | tar xvz
+sudo mv migrate /usr/local/bin/
+
+# Windows
+choco install migrate
+```
+
+#### Apply all pending migrations
+
+```bash
+# For doctor service
+migrate -path doctor-service/migrations \
+  -database "postgres://postgres:postgres@localhost:5432/doctors?sslmode=disable" up
+
+# For appointment service
+migrate -path appointment-service/migrations \
+  -database "postgres://postgres:postgres@localhost:5432/appointments?sslmode=disable" up
+```
+
+#### Revert the last N migrations
+
+```bash
+# Revert 1 migration
+migrate -path doctor-service/migrations \
+  -database "postgres://postgres:postgres@localhost:5432/doctors?sslmode=disable" down 1
+
+# Revert all migrations
+migrate -path doctor-service/migrations \
+  -database "postgres://postgres:postgres@localhost:5432/doctors?sslmode=disable" down
+```
+
+#### Check migration status
+
+```bash
+migrate -path doctor-service/migrations \
+  -database "postgres://postgres:postgres@localhost:5432/doctors?sslmode=disable" version
+```
+
+### Migration Files
+
+**Doctor Service:**
+- `000001_create_doctors.up.sql` — creates the `doctors` table with UUID primary key, unique email constraint.
+- `000001_create_doctors.down.sql` — drops the `doctors` table.
+
+**Appointment Service:**
+- `000001_create_appointments.up.sql` — creates the `appointments` table with UUID primary key, foreign key reference to doctors.
+- `000001_create_appointments.down.sql` — drops the `appointments` table.
+
 ## Prerequisites
 
 - Go 1.25+

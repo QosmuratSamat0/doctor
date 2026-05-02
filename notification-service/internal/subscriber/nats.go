@@ -63,6 +63,13 @@ func (s *natsSubscriber) Start(ctx context.Context) error {
 
 	s.log.Infof("Subscribed to subjects: %v", subjects)
 
+	// Setup graceful shutdown
+	defer func() {
+		if err := s.nc.Drain(); err != nil {
+			s.log.Errorf("Error draining NATS connection: %v", err)
+		}
+	}()
+
 	// Wait for termination signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS appointments (
     id UUID PRIMARY KEY,
     title TEXT NOT NULL,
-    description TEXT,
+    description TEXT NOT NULL DEFAULT '',
     doctor_id UUID NOT NULL,
     status TEXT NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,

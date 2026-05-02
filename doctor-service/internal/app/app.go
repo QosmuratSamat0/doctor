@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 
 	"doctor-service/internal/event"
 	"doctor-service/internal/repository/postgres"
@@ -77,7 +78,13 @@ func Run() error {
 }
 
 func runMigrations(dbURL string, migrationsPath string) error {
-	m, err := migrate.New("file://"+migrationsPath, dbURL)
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("get executable path: %w", err)
+	}
+	exeDir := filepath.Dir(exePath)
+	absMigrationsPath := filepath.Join(exeDir, migrationsPath)
+	m, err := migrate.New("file://"+absMigrationsPath, dbURL)
 	if err != nil {
 		return fmt.Errorf("create migrate instance: %w", err)
 	}
