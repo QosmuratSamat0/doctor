@@ -2,11 +2,12 @@ package usecase
 
 import (
 	"context"
-	"fmt"
-	"sync/atomic"
 	"time"
 
+	"appointment-service/internal/event"
 	"appointment-service/internal/model"
+
+	"github.com/google/uuid"
 )
 
 type AppointmentRepository interface {
@@ -37,18 +38,36 @@ type CreateAppointmentInput struct {
 	DoctorID    string
 }
 
+type AppointmentCreatedEvent struct {
+	EventType  string       `json:"event_type"`
+	OccurredAt string       `json:"occurred_at"`
+	ID         string       `json:"id"`
+	Title      string       `json:"title"`
+	DoctorID   string       `json:"doctor_id"`
+	Status     model.Status `json:"status"`
+}
+
+type AppointmentStatusUpdatedEvent struct {
+	EventType  string       `json:"event_type"`
+	OccurredAt string       `json:"occurred_at"`
+	ID         string       `json:"id"`
+	OldStatus  model.Status `json:"old_status"`
+	NewStatus  model.Status `json:"new_status"`
+}
+
 type appointmentUsecase struct {
 	repo          AppointmentRepository
 	doctorChecker DoctorVerifier
 	logger        Logger
-	idCounter     atomic.Uint64
+	publisher     event.EventPublisher
 }
 
-func NewAppointmentUsecase(repo AppointmentRepository, doctorChecker DoctorVerifier, logger Logger) AppointmentUsecase {
+func NewAppointmentUsecase(repo AppointmentRepository, doctorChecker DoctorVerifier, logger Logger, publisher event.EventPublisher) AppointmentUsecase {
 	return &appointmentUsecase{
 		repo:          repo,
 		doctorChecker: doctorChecker,
 		logger:        logger,
+		publisher:     publisher,
 	}
 }
 
@@ -66,7 +85,7 @@ func (u *appointmentUsecase) Create(ctx context.Context, input CreateAppointment
 
 	now := time.Now().UTC()
 	appointment := model.Appointment{
-		ID:          fmt.Sprintf("appointment-%d", u.idCounter.Add(1)),
+		ID:          uuid.New().String(),
 		Title:       input.Title,
 		Description: input.Description,
 		DoctorID:    input.DoctorID,
@@ -75,7 +94,19 @@ func (u *appointmentUsecase) Create(ctx context.Context, input CreateAppointment
 		UpdatedAt:   now,
 	}
 
-	return u.repo.Create(ctx, appointment)
+	created, err := u.repo.Create(ctx, appointment)
+	if err == nil && u.publisher != nil {
+		_ = u.publisher.Publish(ctx, "appointments.created", AppointmentCreatedEvent{
+			EventType:  "appointments.created",
+			OccurredAt: time.Now().Format(time.RFC3339),
+			ID:         created.ID,
+			Title:      created.Title,
+			DoctorID:   created.DoctorID,
+			Status:     created.Status,
+		})
+	}
+
+	return created, err
 }
 
 func (u *appointmentUsecase) GetByID(ctx context.Context, id string) (model.Appointment, error) {
@@ -104,9 +135,21 @@ func (u *appointmentUsecase) UpdateStatus(ctx context.Context, id string, status
 		return model.Appointment{}, err
 	}
 
+	oldStatus := appointment.Status
 	appointment.Status = status
 	appointment.UpdatedAt = time.Now().UTC()
-	return u.repo.Update(ctx, appointment)
+	updated, err := u.repo.Update(ctx, appointment)
+	if err == nil && u.publisher != nil {
+		_ = u.publisher.Publish(ctx, "appointments.status_updated", AppointmentStatusUpdatedEvent{
+			EventType:  "appointments.status_updated",
+			OccurredAt: time.Now().Format(time.RFC3339),
+			ID:         updated.ID,
+			OldStatus:  oldStatus,
+			NewStatus:  updated.Status,
+		})
+	}
+
+	return updated, err
 }
 
 func (u *appointmentUsecase) verifyDoctor(ctx context.Context, doctorID string, action string) error {

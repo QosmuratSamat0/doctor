@@ -1,21 +1,31 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
 
-	"doctor-service/internal/repository"
+	"doctor-service/internal/event"
+	"doctor-service/internal/repository/postgres"
 	grpctransport "doctor-service/internal/transport/grpc"
 	httptransport "doctor-service/internal/transport/http"
 	"doctor-service/internal/usecase"
 	doctorpb "doctor-service/proto"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-migrate/migrate/v4"
+	_ "github.com/golang-migrate/migrate/v4/database/postgres"
+	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/joho/godotenv"
+	"github.com/nats-io/nats.go"
 	"google.golang.org/grpc"
 )
 
 func Run() error {
+	_ = godotenv.Load()
+	ctx := context.Background()
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8081"
@@ -26,8 +36,39 @@ func Run() error {
 		grpcPort = "9091"
 	}
 
-	repo := repository.NewInMemoryDoctorRepository()
-	uc := usecase.NewDoctorUsecase(repo)
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://postgres:postgres@localhost:5432/doctors?sslmode=disable"
+	}
+
+	if err := runMigrations(dbURL, "migrations"); err != nil {
+		return fmt.Errorf("run migrations: %w", err)
+	}
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		return fmt.Errorf("connect to postgres: %w", err)
+	}
+	defer pool.Close()
+
+	natsURL := os.Getenv("NATS_URL")
+	if natsURL == "" {
+		natsURL = "nats://localhost:4222"
+	}
+	nc, err := nats.Connect(natsURL)
+	if err != nil {
+		fmt.Printf("warning: could not connect to NATS at %s: %v\n", natsURL, err)
+	} else {
+		defer nc.Close()
+	}
+
+	var publisher event.EventPublisher
+	if nc != nil {
+		publisher = event.NewNatsPublisher(nc)
+	}
+
+	repo := postgres.NewPostgresRepo(pool)
+	uc := usecase.NewDoctorUsecase(repo, publisher)
 	httpHandler := httptransport.NewDoctorHandler(uc)
 	grpcHandler := grpctransport.NewDoctorHandler(uc)
 
@@ -53,4 +94,16 @@ func Run() error {
 	}()
 
 	return <-errCh
+}
+
+func runMigrations(dbURL string, migrationsPath string) error {
+	m, err := migrate.New("file://"+migrationsPath, dbURL)
+	if err != nil {
+		return fmt.Errorf("create migrate instance: %w", err)
+	}
+	defer m.Close()
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		return fmt.Errorf("migrate up: %w", err)
+	}
+	return nil
 }

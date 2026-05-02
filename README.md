@@ -1,11 +1,12 @@
 # Medical Scheduling Platform
 
-This project implements a two-service medical scheduling platform in Go using Clean Architecture and gRPC microservices.
+This project implements a three-service medical scheduling platform in Go using Clean Architecture and microservices patterns.
 
 The system is split into:
 
-- doctor-service: owns doctor profile data.
-- appointment-service: owns appointment data and validates doctor existence through Doctor Service over gRPC.
+- **doctor-service**: owns doctor profile data and publishes events via NATS.
+- **appointment-service**: owns appointment data and validates doctor existence through Doctor Service over gRPC. Also publishes events via NATS.
+- **notification-service**: subscribes to events from other services via NATS and processes notifications.
 
 ## Project Overview
 
@@ -14,20 +15,46 @@ The platform demonstrates:
 - separation of concerns inside each service;
 - bounded contexts with separate data ownership;
 - synchronous gRPC communication between services;
-- basic failure handling when one service depends on another over the network.
+- asynchronous event-driven communication via NATS;
+- basic failure handling when services depend on each other over the network.
 
 Each service keeps business rules in the use case layer, persistence in the repository layer, and transport-specific logic in thin gRPC handlers.
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    C[Client: Postman or grpcurl]
-    C -->|gRPC :9091| DS[Doctor Service\nDoctorService RPCs]
-    C -->|gRPC :9092| AS[Appointment Service\nAppointmentService RPCs]
-    DS --> DDB[(Doctor Repository\nowned by doctor-service)]
-    AS --> ADB[(Appointment Repository\nowned by appointment-service)]
-    AS -->|GetDoctor RPC\nlocalhost:9091| DS
+graph TB
+    subgraph "Clients"
+        C[Client: Postman or grpcurl]
+    end
+    
+    subgraph "Synchronous APIs"
+        DS["Doctor Service<br/>(gRPC :9091)<br/>CreateDoctor, GetDoctor, ListDoctors"]
+        AS["Appointment Service<br/>(gRPC :9092)<br/>CreateAppointment, GetAppointment, etc."]
+    end
+    
+    subgraph "Data Layer"
+        DDB[(Doctor DB<br/>owned by doctor-service)]
+        ADB[(Appointment DB<br/>owned by appointment-service)]
+    end
+    
+    subgraph "Asynchronous Messaging"
+        NATS["NATS Message Broker<br/>(localhost:4222)"]
+    end
+    
+    subgraph "Event Processing"
+        NS["Notification Service<br/>Subscribes to events<br/>and processes notifications"]
+    end
+    
+    C -->|gRPC :9091| DS
+    C -->|gRPC :9092| AS
+    DS --> DDB
+    AS --> ADB
+    AS -->|GetDoctor RPC| DS
+    
+    DS -->|Publish: doctors.created| NATS
+    AS -->|Publish: appointments.created<br/>appointments.status_updated| NATS
+    NATS -->|Subscribe & Process| NS
 ```
 
 ## Service Responsibilities
@@ -44,6 +71,10 @@ Rules:
 - email is required.
 - email must be unique.
 
+Events Published:
+
+- `doctors.created`: emitted when a new doctor is created.
+
 ### Appointment Service RPCs
 
 - CreateAppointment
@@ -59,6 +90,21 @@ Rules:
 - status must be new, in_progress, or done;
 - transition from done back to new is rejected.
 
+Events Published:
+
+- `appointments.created`: emitted when a new appointment is created.
+- `appointments.status_updated`: emitted when appointment status changes.
+
+### Notification Service
+
+Subscribes to events from Doctor Service and Appointment Service via NATS and processes notifications.
+
+Subscribed Events:
+
+- `doctors.created`: notifies about new doctors.
+- `appointments.created`: notifies about new appointments.
+- `appointments.status_updated`: notifies about appointment status changes.
+
 ## Folder Structure And Dependency Flow
 
 Each service follows the same shape:
@@ -68,9 +114,11 @@ service/
 ├── cmd/service-name/main.go
 └── internal/
     ├── app/             # application wiring
+    ├── logger/          # logging interface (notification-service specific)
     ├── model/           # domain entities
-    ├── repository/      # persistence implementation
-    ├── transport/grpc/  # gRPC handlers and mapping
+    ├── repository/      # persistence implementation (doctor/appointment services)
+    ├── subscriber/      # event subscriber implementation (notification-service specific)
+    ├── transport/       # gRPC/HTTP handlers
     └── usecase/         # business logic and interfaces
 ```
 
@@ -84,6 +132,8 @@ Dependency direction points inward:
 
 ## Inter-Service Communication
 
+### Synchronous (gRPC)
+
 Appointment Service calls Doctor Service over gRPC with GetDoctor before:
 
 - creating an appointment;
@@ -91,7 +141,17 @@ Appointment Service calls Doctor Service over gRPC with GetDoctor before:
 
 Appointment Service never accesses Doctor Service storage directly. This explicit RPC boundary keeps services decoupled at the data layer.
 
+### Asynchronous (NATS)
+
+- Doctor Service publishes `doctors.created` events when new doctors are created.
+- Appointment Service publishes `appointments.created` and `appointments.status_updated` events for appointment state changes.
+- Notification Service subscribes to these events and processes them asynchronously without blocking the originating services.
+
+This decouples notification logic from core business operations.
+
 ## Failure Scenario
+
+### gRPC (Synchronous)
 
 If Doctor Service is unavailable when Appointment Service tries to create or update an appointment:
 
@@ -104,6 +164,20 @@ Current resilience is intentionally basic for the assignment:
 - a 2-second timeout is configured on outbound gRPC client;
 - no retry policy is applied;
 - no circuit breaker is implemented.
+
+### NATS (Asynchronous)
+
+If NATS is unavailable when Doctor Service or Appointment Service tries to publish an event:
+
+- the service gracefully handles the error;
+- the core operation (create doctor/appointment) still succeeds;
+- events may be lost if publishing fails (no persistent queue).
+
+If Notification Service loses connection to NATS:
+
+- it attempts to reconnect with exponential backoff (max 10 retries, up to 32 seconds);
+- events published during disconnection are not replayed (fire-and-forget model);
+- the service logs connection failures for debugging.
 
 ## REST vs gRPC Trade-Offs
 
@@ -129,10 +203,11 @@ Current resilience is intentionally basic for the assignment:
 
 ## Prerequisites
 
-- Go 1.24+
+- Go 1.25+
 - protoc compiler
 - protoc-gen-go plugin
 - protoc-gen-go-grpc plugin
+- Docker and Docker Compose (for running the full stack with PostgreSQL and NATS)
 
 ### Install protoc and plugins
 
@@ -216,6 +291,18 @@ This launches:
 
 - Doctor Service gRPC on localhost:9091
 - Appointment Service gRPC on localhost:9092
+- Notification Service subscribing to NATS at localhost:4222
+
+### 4. Start Notification Service
+
+In another terminal:
+
+```bash
+cd notification-service
+go run ./cmd/notification
+```
+
+Notification Service will connect to NATS at localhost:4222 (configurable via NATS_URL environment variable).
 
 ## gRPC Testing Artifact (grpcurl)
 

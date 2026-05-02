@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"appointment-service/internal/usecase"
-	doctorpb "doctor-service/proto"
+	doctorpb "appointment-service/proto/doctor"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"

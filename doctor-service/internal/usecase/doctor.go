@@ -2,10 +2,12 @@ package usecase
 
 import (
 	"context"
-	"fmt"
-	"sync/atomic"
+	"time"
 
+	"doctor-service/internal/event"
 	"doctor-service/internal/model"
+
+	"github.com/google/uuid"
 )
 
 type DoctorRepository interface {
@@ -27,13 +29,22 @@ type CreateDoctorInput struct {
 	Email          string
 }
 
-type doctorUsecase struct {
-	repo      DoctorRepository
-	idCounter atomic.Uint64
+type DoctorCreatedEvent struct {
+	EventType      string `json:"event_type"`
+	OccurredAt     string `json:"occurred_at"`
+	ID             string `json:"id"`
+	FullName       string `json:"full_name"`
+	Specialization string `json:"specialization"`
+	Email          string `json:"email"`
 }
 
-func NewDoctorUsecase(repo DoctorRepository) DoctorUsecase {
-	return &doctorUsecase{repo: repo}
+type doctorUsecase struct {
+	repo      DoctorRepository
+	publisher event.EventPublisher
+}
+
+func NewDoctorUsecase(repo DoctorRepository, publisher event.EventPublisher) DoctorUsecase {
+	return &doctorUsecase{repo: repo, publisher: publisher}
 }
 
 func (u *doctorUsecase) Create(ctx context.Context, input CreateDoctorInput) (model.Doctor, error) {
@@ -51,13 +62,25 @@ func (u *doctorUsecase) Create(ctx context.Context, input CreateDoctorInput) (mo
 	}
 
 	doctor := model.Doctor{
-		ID:             fmt.Sprintf("doctor-%d", u.idCounter.Add(1)),
+		ID:             uuid.New().String(),
 		FullName:       input.FullName,
 		Specialization: input.Specialization,
 		Email:          input.Email,
 	}
 
-	return u.repo.Create(ctx, doctor)
+	created, err := u.repo.Create(ctx, doctor)
+	if err == nil && u.publisher != nil {
+		_ = u.publisher.Publish(ctx, "doctors.created", DoctorCreatedEvent{
+			EventType:      "doctors.created",
+			OccurredAt:     time.Now().Format(time.RFC3339),
+			ID:             created.ID,
+			FullName:       created.FullName,
+			Specialization: created.Specialization,
+			Email:          created.Email,
+		})
+	}
+
+	return created, err
 }
 
 func (u *doctorUsecase) GetByID(ctx context.Context, id string) (model.Doctor, error) {
