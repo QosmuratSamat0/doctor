@@ -42,13 +42,8 @@ func (s *natsSubscriber) Start(ctx context.Context) error {
 			return
 		}
 
-		timestamp := fmt.Sprintf("%v", time.Now())
-		if meta, err := m.Metadata(); err == nil {
-			timestamp = fmt.Sprintf("%v", meta.Timestamp)
-		}
-
 		event := model.Event{
-			Time:    timestamp,
+			Time:    time.Now().UTC(),
 			Subject: m.Subject,
 			Event:   payload,
 		}

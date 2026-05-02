@@ -24,25 +24,23 @@ func NewNotificationUsecase(log logger.Logger) NotificationUsecase {
 }
 
 func (u *notificationUsecase) HandleEvent(ctx context.Context, event model.Event) error {
-	u.logger.Infof("Processing event from subject: %s", event.Subject)
+	logPayload := struct {
+		Time    string      `json:"time"`
+		Subject string      `json:"subject"`
+		Event   interface{} `json:"event"`
+	}{
+		Time:    event.Time.UTC().Format(time.RFC3339),
+		Subject: event.Subject,
+		Event:   event.Event,
+	}
 
-	// Parse event payload
-	eventData, err := json.Marshal(event.Event)
+	data, err := json.Marshal(logPayload)
 	if err != nil {
-		u.logger.Errorf("Failed to marshal event: %v", err)
+		u.logger.Errorf("Failed to marshal event log: %v", err)
 		return err
 	}
 
-	// Create notification
-	notification := model.Notification{
-		Title:     formatTitle(event.Subject),
-		Message:   string(eventData),
-		Timestamp: time.Now(),
-	}
-
-	// Log notification
-	u.logger.Infof("Notification created: %s - %s", notification.Title, notification.Message)
-
+	u.logger.Infof(string(data))
 	return nil
 }
 

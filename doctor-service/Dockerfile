@@ -16,6 +16,7 @@ FROM alpine:3.19
 RUN apk add --no-cache ca-certificates
 WORKDIR /root/
 COPY --from=builder /main .
+COPY --from=builder /app/migrations ./migrations
 
 EXPOSE 8081 9091
 CMD ["./main"]

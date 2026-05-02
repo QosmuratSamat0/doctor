@@ -1,7 +1,9 @@
 package model
 
+import "time"
+
 type Event struct {
-	Time	string
+	Time    time.Time
 	Subject string
 	Event   interface{}
 }

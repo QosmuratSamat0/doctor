@@ -1,6 +1,10 @@
 package model
 
-import "time"
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
 
 type Status string
 
@@ -11,10 +15,10 @@ const (
 )
 
 type Appointment struct {
-	ID          string
+	ID          uuid.UUID
 	Title       string
 	Description string
-	DoctorID    string
+	DoctorID    uuid.UUID
 	Status      Status
 	CreatedAt   time.Time
 	UpdatedAt   time.Time

@@ -8,6 +8,7 @@ import (
 	"doctor-service/internal/usecase"
 	doctorpb "doctor-service/proto"
 
+	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -35,7 +36,12 @@ func (h *DoctorHandler) CreateDoctor(ctx context.Context, req *doctorpb.CreateDo
 }
 
 func (h *DoctorHandler) GetDoctor(ctx context.Context, req *doctorpb.GetDoctorRequest) (*doctorpb.DoctorResponse, error) {
-	doctor, err := h.uc.GetByID(ctx, req.GetId())
+	id, err := uuid.Parse(req.GetId())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid doctor id")
+	}
+
+	doctor, err := h.uc.GetByID(ctx, id)
 	if err != nil {
 		return nil, mapDoctorError(err, codes.Internal, "failed to fetch doctor")
 	}
@@ -74,7 +80,7 @@ func mapDoctorError(err error, fallbackCode codes.Code, fallbackMessage string) 
 
 func toDoctorResponse(doctor model.Doctor) *doctorpb.DoctorResponse {
 	return &doctorpb.DoctorResponse{
-		Id:             doctor.ID,
+		Id:             doctor.ID.String(),
 		FullName:       doctor.FullName,
 		Specialization: doctor.Specialization,
 		Email:          doctor.Email,

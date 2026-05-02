@@ -11,11 +11,9 @@ import (
 	"appointment-service/internal/event"
 	"appointment-service/internal/repository/postgres"
 	grpctransport "appointment-service/internal/transport/grpc"
-	httptransport "appointment-service/internal/transport/http"
 	"appointment-service/internal/usecase"
 	appointmentpb "appointment-service/proto"
 
-	"github.com/gin-gonic/gin"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -28,10 +26,6 @@ import (
 func Run() error {
 	_ = godotenv.Load()
 	ctx := context.Background()
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8082"
-	}
 
 	grpcPort := os.Getenv("GRPC_PORT")
 	if grpcPort == "" {
@@ -84,11 +78,7 @@ func Run() error {
 
 	logger := &stdLogger{}
 	uc := usecase.NewAppointmentUsecase(repo, doctorClient, logger, publisher)
-	httpHandler := httptransport.NewAppointmentHandler(uc)
 	grpcHandler := grpctransport.NewAppointmentHandler(uc)
-
-	router := gin.Default()
-	httpHandler.RegisterRoutes(router)
 
 	grpcServer := grpc.NewServer()
 	appointmentpb.RegisterAppointmentServiceServer(grpcServer, grpcHandler)
@@ -98,17 +88,7 @@ func Run() error {
 		return fmt.Errorf("listen grpc: %w", err)
 	}
 
-	errCh := make(chan error, 2)
-
-	go func() {
-		errCh <- router.Run(fmt.Sprintf(":%s", port))
-	}()
-
-	go func() {
-		errCh <- grpcServer.Serve(listener)
-	}()
-
-	return <-errCh
+	return grpcServer.Serve(listener)
 }
 
 func runMigrations(dbURL string, migrationsPath string) error {

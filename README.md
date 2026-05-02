@@ -118,7 +118,7 @@ service/
     ├── model/           # domain entities
     ├── repository/      # persistence implementation (doctor/appointment services)
     ├── subscriber/      # event subscriber implementation (notification-service specific)
-    ├── transport/       # gRPC/HTTP handlers
+    ├── transport/       # gRPC handlers
     └── usecase/         # business logic and interfaces
 ```
 
@@ -148,6 +148,43 @@ Appointment Service never accesses Doctor Service storage directly. This explici
 - Notification Service subscribes to these events and processes them asynchronously without blocking the originating services.
 
 This decouples notification logic from core business operations.
+
+## Event Contract
+
+Events are published as JSON to NATS. Notification Service logs a JSON line for each event with fields `time`, `subject`, and `event`.
+
+Example payloads:
+
+```json
+{
+  "event_type": "doctors.created",
+  "occurred_at": "2026-05-02T10:15:30Z",
+  "id": "2a4b6d2c-5b9d-4c75-9a7c-2d6f8f2c6f32",
+  "full_name": "Dr. Aisha Seitkali",
+  "specialization": "Cardiology",
+  "email": "a.seitkali@clinic.kz"
+}
+```
+
+```json
+{
+  "event_type": "appointments.status_updated",
+  "occurred_at": "2026-05-02T10:25:30Z",
+  "id": "c1d2c3e4-1a2b-3c4d-5e6f-7a8b9c0d1e2f",
+  "old_status": "new",
+  "new_status": "in_progress"
+}
+```
+
+Notification log example:
+
+```json
+{"time":"2026-05-02T10:25:30Z","subject":"appointments.status_updated","event":{"event_type":"appointments.status_updated","occurred_at":"2026-05-02T10:25:30Z","id":"c1d2c3e4-1a2b-3c4d-5e6f-7a8b9c0d1e2f","old_status":"new","new_status":"in_progress"}}
+```
+
+## Broker Choice
+
+NATS is lightweight and low-latency, which fits fire-and-forget event delivery between internal services. RabbitMQ would add durable queues, routing flexibility, and acknowledgements, but at higher operational and protocol complexity. For this assignment the minimal broker setup and gRPC-first services made NATS the pragmatic choice.
 
 ## Failure Scenario
 
@@ -179,28 +216,6 @@ If Notification Service loses connection to NATS:
 - events published during disconnection are not replayed (fire-and-forget model);
 - the service logs connection failures for debugging.
 
-## REST vs gRPC Trade-Offs
-
-1. Contract strictness and type safety
-   - gRPC uses proto schemas and generated types, reducing request-shape drift.
-   - REST with JSON is more flexible but easier to break without strict validation.
-   - Choose gRPC for strongly typed internal service-to-service APIs.
-
-2. Performance and payload format
-   - gRPC uses protobuf (binary), usually smaller and faster than JSON in REST.
-   - REST is simpler to inspect manually and easier for public browser-facing APIs.
-   - Choose gRPC for low-latency internal calls and high-throughput paths.
-
-3. Streaming and bidirectional communication
-   - gRPC natively supports client/server/bidirectional streaming.
-   - REST usually needs extra protocols (SSE/WebSocket) for real-time patterns.
-   - Choose gRPC when your use case needs streaming semantics.
-
-4. Tooling and interoperability
-   - REST is universally accessible with plain HTTP tooling.
-   - gRPC requires proto-aware tooling (Postman gRPC mode, grpcurl, generated clients).
-   - Choose REST for broad external integrations, gRPC for controlled internal ecosystems.
-
 ## Prerequisites
 
 - Go 1.25+
@@ -208,6 +223,41 @@ If Notification Service loses connection to NATS:
 - protoc-gen-go plugin
 - protoc-gen-go-grpc plugin
 - Docker and Docker Compose (for running the full stack with PostgreSQL and NATS)
+
+## Environment Variables
+
+| Service | Variable | Default | Description |
+| --- | --- | --- | --- |
+| doctor-service | DATABASE_URL | postgres://postgres:postgres@db:5432/doctors?sslmode=disable | Postgres connection string |
+| doctor-service | NATS_URL | nats://nats:4222 | NATS broker URL |
+| doctor-service | GRPC_PORT | 9091 | gRPC listen port |
+| appointment-service | DATABASE_URL | postgres://postgres:postgres@db:5432/appointments?sslmode=disable | Postgres connection string |
+| appointment-service | NATS_URL | nats://nats:4222 | NATS broker URL |
+| appointment-service | GRPC_PORT | 9092 | gRPC listen port |
+| appointment-service | DOCTOR_SERVICE_ADDR | doctor-service:9091 | Doctor Service gRPC address |
+| notification-service | NATS_URL | nats://nats:4222 | NATS broker URL |
+
+## Docker Compose (PostgreSQL + NATS + Services)
+
+From repository root:
+
+```bash
+docker compose up -d --build
+```
+
+Check status:
+
+```bash
+docker compose ps
+```
+
+Follow logs:
+
+```bash
+docker compose logs -f doctor-service
+docker compose logs -f appointment-service
+docker compose logs -f notification-service
+```
 
 ### Install protoc and plugins
 
@@ -240,7 +290,7 @@ make proto-appointment
 
 Or run protoc commands directly from each service folder as defined in Makefile.
 
-## How To Run
+## How To Run (Local)
 
 ### 1. Install service dependencies
 
@@ -249,60 +299,47 @@ From repository root:
 ```bash
 cd doctor-service && go mod tidy
 cd ../appointment-service && go mod tidy
+cd ../notification-service && go mod tidy
 ```
 
-### 2. Start Doctor Service (gRPC)
+### 2. Start PostgreSQL and NATS
+
+If you are not using Docker Compose, make sure PostgreSQL and NATS are running and accessible via the env vars above.
+
+### 3. Start Doctor Service (gRPC)
 
 ```bash
 cd doctor-service
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/doctors?sslmode=disable \
+NATS_URL=nats://localhost:4222 \
+GRPC_PORT=9091 \
 go run ./cmd/doctor-service
 ```
 
-Doctor Service gRPC listens on localhost:9091.
-
-### 3. Start Appointment Service (gRPC)
+### 4. Start Appointment Service (gRPC)
 
 In another terminal:
 
-Linux/macOS:
-
 ```bash
 cd appointment-service
-DOCTOR_SERVICE_ADDR=localhost:9091 go run ./cmd/appointment-service
-```
-
-PowerShell:
-
-```powershell
-cd appointment-service
-$env:DOCTOR_SERVICE_ADDR = "localhost:9091"
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/appointments?sslmode=disable \
+NATS_URL=nats://localhost:4222 \
+GRPC_PORT=9092 \
+DOCTOR_SERVICE_ADDR=localhost:9091 \
 go run ./cmd/appointment-service
 ```
 
-Appointment Service gRPC listens on localhost:9092.
-
-### Optional: start both services from repository root
-
-```bash
-go run .
-```
-
-This launches:
-
-- Doctor Service gRPC on localhost:9091
-- Appointment Service gRPC on localhost:9092
-- Notification Service subscribing to NATS at localhost:4222
-
-### 4. Start Notification Service
+### 5. Start Notification Service
 
 In another terminal:
 
 ```bash
 cd notification-service
+NATS_URL=nats://localhost:4222 \
 go run ./cmd/notification
 ```
 
-Notification Service will connect to NATS at localhost:4222 (configurable via NATS_URL environment variable).
+Migrations are executed automatically on service startup via golang-migrate.
 
 ## gRPC Testing Artifact (grpcurl)
 
@@ -382,7 +419,15 @@ grpcurl -plaintext \
   localhost:9092 appointment.AppointmentService/UpdateAppointmentStatus
 ```
 
+### Expected Notification Output
+
+When the Notification Service processes an event, it logs a single JSON line like:
+
+```json
+{"time":"2026-05-02T10:25:30Z","subject":"appointments.status_updated","event":{"event_type":"appointments.status_updated","occurred_at":"2026-05-02T10:25:30Z","id":"c1d2c3e4-1a2b-3c4d-5e6f-7a8b9c0d1e2f","old_status":"new","new_status":"in_progress"}}
+```
+
 ## Notes
 
-- Both services currently use in-memory repositories to keep focus on architecture and service boundaries.
-- In-memory data is reset on restart.
+- Doctor and Appointment services use PostgreSQL via pgx/v5.
+- Migrations are applied automatically on startup using golang-migrate.

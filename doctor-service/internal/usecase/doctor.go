@@ -12,14 +12,15 @@ import (
 
 type DoctorRepository interface {
 	Create(ctx context.Context, doctor model.Doctor) (model.Doctor, error)
-	GetByID(ctx context.Context, id string) (model.Doctor, error)
+	GetByID(ctx context.Context, id uuid.UUID) (model.Doctor, error)
 	GetByEmail(ctx context.Context, email string) (model.Doctor, error)
 	List(ctx context.Context) ([]model.Doctor, error)
+	WithTx(ctx context.Context, fn func(DoctorRepository) (model.Doctor, error)) (model.Doctor, error)
 }
 
 type DoctorUsecase interface {
 	Create(ctx context.Context, input CreateDoctorInput) (model.Doctor, error)
-	GetByID(ctx context.Context, id string) (model.Doctor, error)
+	GetByID(ctx context.Context, id uuid.UUID) (model.Doctor, error)
 	List(ctx context.Context) ([]model.Doctor, error)
 }
 
@@ -55,25 +56,27 @@ func (u *doctorUsecase) Create(ctx context.Context, input CreateDoctorInput) (mo
 		return model.Doctor{}, ErrEmailRequired
 	}
 
-	if _, err := u.repo.GetByEmail(ctx, input.Email); err == nil {
-		return model.Doctor{}, ErrDoctorEmailExists
-	} else if err != ErrDoctorNotFound {
-		return model.Doctor{}, err
-	}
+	created, err := u.repo.WithTx(ctx, func(repo DoctorRepository) (model.Doctor, error) {
+		if _, err := repo.GetByEmail(ctx, input.Email); err == nil {
+			return model.Doctor{}, ErrDoctorEmailExists
+		} else if err != ErrDoctorNotFound {
+			return model.Doctor{}, err
+		}
 
-	doctor := model.Doctor{
-		ID:             uuid.New().String(),
-		FullName:       input.FullName,
-		Specialization: input.Specialization,
-		Email:          input.Email,
-	}
+		doctor := model.Doctor{
+			ID:             uuid.New(),
+			FullName:       input.FullName,
+			Specialization: input.Specialization,
+			Email:          input.Email,
+		}
 
-	created, err := u.repo.Create(ctx, doctor)
+		return repo.Create(ctx, doctor)
+	})
 	if err == nil && u.publisher != nil {
 		_ = u.publisher.Publish(ctx, "doctors.created", DoctorCreatedEvent{
 			EventType:      "doctors.created",
 			OccurredAt:     time.Now().Format(time.RFC3339),
-			ID:             created.ID,
+			ID:             created.ID.String(),
 			FullName:       created.FullName,
 			Specialization: created.Specialization,
 			Email:          created.Email,
@@ -83,7 +86,7 @@ func (u *doctorUsecase) Create(ctx context.Context, input CreateDoctorInput) (mo
 	return created, err
 }
 
-func (u *doctorUsecase) GetByID(ctx context.Context, id string) (model.Doctor, error) {
+func (u *doctorUsecase) GetByID(ctx context.Context, id uuid.UUID) (model.Doctor, error) {
 	return u.repo.GetByID(ctx, id)
 }
 

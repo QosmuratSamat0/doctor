@@ -12,9 +12,10 @@ import (
 
 type AppointmentRepository interface {
 	Create(ctx context.Context, appointment model.Appointment) (model.Appointment, error)
-	GetByID(ctx context.Context, id string) (model.Appointment, error)
+	GetByID(ctx context.Context, id uuid.UUID) (model.Appointment, error)
 	List(ctx context.Context) ([]model.Appointment, error)
 	Update(ctx context.Context, appointment model.Appointment) (model.Appointment, error)
+	WithTx(ctx context.Context, fn func(AppointmentRepository) (model.Appointment, error)) (model.Appointment, error)
 }
 
 type DoctorVerifier interface {
@@ -27,15 +28,15 @@ type Logger interface {
 
 type AppointmentUsecase interface {
 	Create(ctx context.Context, input CreateAppointmentInput) (model.Appointment, error)
-	GetByID(ctx context.Context, id string) (model.Appointment, error)
+	GetByID(ctx context.Context, id uuid.UUID) (model.Appointment, error)
 	List(ctx context.Context) ([]model.Appointment, error)
-	UpdateStatus(ctx context.Context, id string, status model.Status) (model.Appointment, error)
+	UpdateStatus(ctx context.Context, id uuid.UUID, status model.Status) (model.Appointment, error)
 }
 
 type CreateAppointmentInput struct {
 	Title       string
 	Description string
-	DoctorID    string
+	DoctorID    uuid.UUID
 }
 
 type AppointmentCreatedEvent struct {
@@ -75,17 +76,17 @@ func (u *appointmentUsecase) Create(ctx context.Context, input CreateAppointment
 	if input.Title == "" {
 		return model.Appointment{}, ErrTitleRequired
 	}
-	if input.DoctorID == "" {
+	if input.DoctorID == uuid.Nil {
 		return model.Appointment{}, ErrDoctorIDRequired
 	}
 
-	if err := u.verifyDoctor(ctx, input.DoctorID, "create"); err != nil {
+	if err := u.verifyDoctor(ctx, input.DoctorID.String(), "create"); err != nil {
 		return model.Appointment{}, err
 	}
 
 	now := time.Now().UTC()
 	appointment := model.Appointment{
-		ID:          uuid.New().String(),
+		ID:          uuid.New(),
 		Title:       input.Title,
 		Description: input.Description,
 		DoctorID:    input.DoctorID,
@@ -99,9 +100,9 @@ func (u *appointmentUsecase) Create(ctx context.Context, input CreateAppointment
 		_ = u.publisher.Publish(ctx, "appointments.created", AppointmentCreatedEvent{
 			EventType:  "appointments.created",
 			OccurredAt: time.Now().Format(time.RFC3339),
-			ID:         created.ID,
+			ID:         created.ID.String(),
 			Title:      created.Title,
-			DoctorID:   created.DoctorID,
+			DoctorID:   created.DoctorID.String(),
 			Status:     created.Status,
 		})
 	}
@@ -109,7 +110,7 @@ func (u *appointmentUsecase) Create(ctx context.Context, input CreateAppointment
 	return created, err
 }
 
-func (u *appointmentUsecase) GetByID(ctx context.Context, id string) (model.Appointment, error) {
+func (u *appointmentUsecase) GetByID(ctx context.Context, id uuid.UUID) (model.Appointment, error) {
 	return u.repo.GetByID(ctx, id)
 }
 
@@ -117,33 +118,36 @@ func (u *appointmentUsecase) List(ctx context.Context) ([]model.Appointment, err
 	return u.repo.List(ctx)
 }
 
-func (u *appointmentUsecase) UpdateStatus(ctx context.Context, id string, status model.Status) (model.Appointment, error) {
+func (u *appointmentUsecase) UpdateStatus(ctx context.Context, id uuid.UUID, status model.Status) (model.Appointment, error) {
 	if !isValidStatus(status) {
 		return model.Appointment{}, ErrInvalidStatus
 	}
 
-	appointment, err := u.repo.GetByID(ctx, id)
-	if err != nil {
-		return model.Appointment{}, err
-	}
+	var oldStatus model.Status
+	updated, err := u.repo.WithTx(ctx, func(repo AppointmentRepository) (model.Appointment, error) {
+		appointment, err := repo.GetByID(ctx, id)
+		if err != nil {
+			return model.Appointment{}, err
+		}
 
-	if appointment.Status == model.StatusDone && status == model.StatusNew {
-		return model.Appointment{}, ErrInvalidStatusTransition
-	}
+		if appointment.Status == model.StatusDone && status == model.StatusNew {
+			return model.Appointment{}, ErrInvalidStatusTransition
+		}
 
-	if err := u.verifyDoctor(ctx, appointment.DoctorID, "update"); err != nil {
-		return model.Appointment{}, err
-	}
+		if err := u.verifyDoctor(ctx, appointment.DoctorID.String(), "update"); err != nil {
+			return model.Appointment{}, err
+		}
 
-	oldStatus := appointment.Status
-	appointment.Status = status
-	appointment.UpdatedAt = time.Now().UTC()
-	updated, err := u.repo.Update(ctx, appointment)
+		oldStatus = appointment.Status
+		appointment.Status = status
+		appointment.UpdatedAt = time.Now().UTC()
+		return repo.Update(ctx, appointment)
+	})
 	if err == nil && u.publisher != nil {
 		_ = u.publisher.Publish(ctx, "appointments.status_updated", AppointmentStatusUpdatedEvent{
 			EventType:  "appointments.status_updated",
 			OccurredAt: time.Now().Format(time.RFC3339),
-			ID:         updated.ID,
+			ID:         updated.ID.String(),
 			OldStatus:  oldStatus,
 			NewStatus:  updated.Status,
 		})

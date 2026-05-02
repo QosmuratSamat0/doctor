@@ -9,11 +9,9 @@ import (
 	"doctor-service/internal/event"
 	"doctor-service/internal/repository/postgres"
 	grpctransport "doctor-service/internal/transport/grpc"
-	httptransport "doctor-service/internal/transport/http"
 	"doctor-service/internal/usecase"
 	doctorpb "doctor-service/proto"
 
-	"github.com/gin-gonic/gin"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -26,10 +24,6 @@ import (
 func Run() error {
 	_ = godotenv.Load()
 	ctx := context.Background()
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8081"
-	}
 
 	grpcPort := os.Getenv("GRPC_PORT")
 	if grpcPort == "" {
@@ -69,11 +63,7 @@ func Run() error {
 
 	repo := postgres.NewPostgresRepo(pool)
 	uc := usecase.NewDoctorUsecase(repo, publisher)
-	httpHandler := httptransport.NewDoctorHandler(uc)
 	grpcHandler := grpctransport.NewDoctorHandler(uc)
-
-	router := gin.Default()
-	httpHandler.RegisterRoutes(router)
 
 	grpcServer := grpc.NewServer()
 	doctorpb.RegisterDoctorServiceServer(grpcServer, grpcHandler)
@@ -83,17 +73,7 @@ func Run() error {
 		return fmt.Errorf("listen grpc: %w", err)
 	}
 
-	errCh := make(chan error, 2)
-
-	go func() {
-		errCh <- router.Run(fmt.Sprintf(":%s", port))
-	}()
-
-	go func() {
-		errCh <- grpcServer.Serve(listener)
-	}()
-
-	return <-errCh
+	return grpcServer.Serve(listener)
 }
 
 func runMigrations(dbURL string, migrationsPath string) error {
