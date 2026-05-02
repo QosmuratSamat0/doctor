@@ -1,4 +1,4 @@
-FROM golang:1.23-alpine AS builder
+FROM golang:1.25-alpine AS builder
 WORKDIR /app
 
 # 1. Copy only what is needed for dependency caching
@@ -9,7 +9,7 @@ RUN go mod download
 COPY . .
 
 # 3. Build
-RUN go build -o /main ./cmd/notification-service/main.go
+RUN go build -o /main ./cmd/notification/main.go
 
 # Final lightweight image
 FROM alpine:3.19
