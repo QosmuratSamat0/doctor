@@ -20,7 +20,25 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Ensure infrastructure is running if docker-compose is available
+	log.Println("Ensuring infrastructure (DB, Redis, NATS) is running...")
+	infraCmd := exec.Command("docker", "compose", "up", "-d", "db", "redis", "nats")
+	infraCmd.Stdout = os.Stdout
+	infraCmd.Stderr = os.Stderr
+	if err := infraCmd.Run(); err != nil {
+		log.Printf("Warning: failed to run docker-compose: %v. Assuming infra is already running.", err)
+	} else {
+		// Wait a bit for infra to be ready
+		time.Sleep(2 * time.Second)
+	}
+
 	processes := []*serviceProcess{
+		newServiceProcess(
+			"mock-gateway",
+			"mock-gateway",
+			[]string{"go", "run", "."},
+			nil,
+		),
 		newServiceProcess(
 			"doctor-service",
 			"doctor-service",
@@ -33,6 +51,12 @@ func main() {
 			[]string{"go", "run", "./cmd/appointment-service"},
 			[]string{"DOCTOR_SERVICE_ADDR=localhost:9091"},
 		),
+		newServiceProcess(
+			"notification-service",
+			"notification-service",
+			[]string{"go", "run", "./cmd/notification"},
+			nil,
+		),
 	}
 
 	for _, process := range processes {
@@ -41,8 +65,10 @@ func main() {
 			log.Fatalf("failed to start %s: %v", process.name, err)
 		}
 		log.Printf("%s started with PID %d", process.name, process.cmd.Process.Pid)
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
+
+	log.Println("All services are running. Press Ctrl+C to stop.")
 
 	errCh := make(chan error, len(processes))
 	for _, process := range processes {
@@ -90,6 +116,7 @@ func stopAll(processes []*serviceProcess) {
 		if process.cmd.Process == nil {
 			continue
 		}
+		log.Printf("stopping %s (PID %d)...", process.name, process.cmd.Process.Pid)
 		_ = process.cmd.Process.Signal(syscall.SIGTERM)
 	}
 }

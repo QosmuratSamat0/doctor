@@ -8,7 +8,10 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/nats-io/nats.go"
+	"github.com/redis/go-redis/v9"
+	"strconv"
 
+	"notification-service/internal/jobqueue"
 	"notification-service/internal/logger"
 	"notification-service/internal/subscriber"
 	"notification-service/internal/usecase"
@@ -52,8 +55,38 @@ func Run() error {
 
 	log.Infof("Connected to NATS at %s", natsURL)
 
+	redisURL := os.Getenv("REDIS_URL")
+	if redisURL == "" {
+		redisURL = "redis://localhost:6379"
+	}
+	var rdb *redis.Client
+	opt, redisErr := redis.ParseURL(redisURL)
+	if redisErr != nil {
+		log.Errorf("warning: could not parse Redis URL %s: %v", redisURL, redisErr)
+	} else {
+		rdb = redis.NewClient(opt)
+		if err := rdb.Ping(context.Background()).Err(); err != nil {
+			log.Errorf("warning: could not connect to Redis at %s: %v", redisURL, err)
+			rdb = nil
+		}
+	}
+
+	gatewayURL := os.Getenv("GATEWAY_URL")
+	if gatewayURL == "" {
+		gatewayURL = "http://localhost:8080"
+	}
+
+	poolSizeStr := os.Getenv("WORKER_POOL_SIZE")
+	poolSize, _ := strconv.Atoi(poolSizeStr)
+	if poolSize <= 0 {
+		poolSize = 3
+	}
+
+	jobQueue := jobqueue.NewJobQueue(rdb, gatewayURL, poolSize)
+	defer jobQueue.Stop()
+
 	// Initialize usecase
-	notificationUC := usecase.NewNotificationUsecase(log)
+	notificationUC := usecase.NewNotificationUsecase(log, jobQueue)
 
 	// Initialize and start subscriber
 	notifSubscriber := subscriber.NewNotificationSubscriber(nc, notificationUC, log)

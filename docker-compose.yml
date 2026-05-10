@@ -15,50 +15,17 @@ services:
       - db_data:/var/lib/postgresql/data
       - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
 
-  doctor-service:
-    build:
-      context: ./doctor-service
-      dockerfile: Dockerfile
-    environment:
-      DATABASE_URL: postgres://postgres:postgres@db:5432/doctors?sslmode=disable
-      NATS_URL: nats://nats:4222
-      GRPC_PORT: 9091
+  redis:
+    image: redis:alpine
     ports:
-      - "9091:9091"
-    depends_on:
-      db:
-        condition: service_healthy
-      nats:
-        condition: service_started
-
-  appointment-service:
-    build:
-      context: ./appointment-service
-      dockerfile: Dockerfile
-    environment:
-      DATABASE_URL: postgres://postgres:postgres@db:5432/appointments?sslmode=disable
-      NATS_URL: nats://nats:4222
-      GRPC_PORT: 9092
-      DOCTOR_SERVICE_ADDR: doctor-service:9091
-    ports:
-      - "9092:9092"
-    depends_on:
-      db:
-        condition: service_healthy
-      doctor-service:
-        condition: service_started
-      nats:
-        condition: service_started
-
-  notification-service:
-    build:
-      context: ./notification-service
-      dockerfile: Dockerfile
-    environment:
-      NATS_URL: nats://nats:4222
-    depends_on:
-      nats:
-        condition: service_started
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   nats:
     image: nats:latest
@@ -66,23 +33,6 @@ services:
       - "4222:4222"
       - "8222:8222"
 
-  migrate-doctor:
-    image: migrate/migrate
-    volumes:
-      - ./doctor-service/migrations:/migrations
-    command: -path=/migrations/ -database "postgres://postgres:postgres@db:5432/doctors?sslmode=disable" up
-    depends_on:
-      db:
-        condition: service_healthy
-
-  migrate-appointment:
-    image: migrate/migrate
-    volumes:
-      - ./appointment-service/migrations:/migrations
-    command: -path=/migrations/ -database "postgres://postgres:postgres@db:5432/appointments?sslmode=disable" up
-    depends_on:
-      db:
-        condition: service_healthy
-
 volumes:
   db_data:
+  redis_data:

@@ -5,15 +5,17 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"time"
 
+	"appointment-service/internal/cache"
 	"appointment-service/internal/client"
 	"appointment-service/internal/event"
+	"appointment-service/internal/middleware"
 	"appointment-service/internal/repository/postgres"
 	grpctransport "appointment-service/internal/transport/grpc"
 	"appointment-service/internal/usecase"
 	appointmentpb "appointment-service/proto"
+	"strconv"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
@@ -21,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/nats-io/nats.go"
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 )
 
@@ -77,11 +80,37 @@ func Run() error {
 	}
 	defer doctorClient.Close()
 
+	redisURL := os.Getenv("REDIS_URL")
+	if redisURL == "" {
+		redisURL = "redis://localhost:6379"
+	}
+	var rdb *redis.Client
+	var cacheRepo cache.CacheRepository
+	opt, err := redis.ParseURL(redisURL)
+	if err != nil {
+		fmt.Printf("warning: could not parse Redis URL %s: %v\n", redisURL, err)
+	} else {
+		rdb = redis.NewClient(opt)
+		if err := rdb.Ping(ctx).Err(); err != nil {
+			fmt.Printf("warning: could not connect to Redis at %s: %v\n", redisURL, err)
+			rdb = nil
+		} else {
+			ttlStr := os.Getenv("CACHE_TTL_SECONDS")
+			ttlSec, _ := strconv.Atoi(ttlStr)
+			if ttlSec <= 0 {
+				ttlSec = 60
+			}
+			cacheRepo = cache.NewRedisCacheRepository(rdb, time.Duration(ttlSec)*time.Second)
+		}
+	}
+
 	logger := &stdLogger{}
-	uc := usecase.NewAppointmentUsecase(repo, doctorClient, logger, publisher)
+	uc := usecase.NewAppointmentUsecase(repo, doctorClient, logger, publisher, cacheRepo)
 	grpcHandler := grpctransport.NewAppointmentHandler(uc)
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(middleware.RateLimitInterceptor(rdb)),
+	)
 	appointmentpb.RegisterAppointmentServiceServer(grpcServer, grpcHandler)
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%s", grpcPort))
@@ -93,13 +122,7 @@ func Run() error {
 }
 
 func runMigrations(dbURL string, migrationsPath string) error {
-	exePath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("get executable path: %w", err)
-	}
-	exeDir := filepath.Dir(exePath)
-	absMigrationsPath := filepath.Join(exeDir, migrationsPath)
-	m, err := migrate.New("file://"+absMigrationsPath, dbURL)
+	m, err := migrate.New("file://"+migrationsPath, dbURL)
 	if err != nil {
 		return fmt.Errorf("create migrate instance: %w", err)
 	}

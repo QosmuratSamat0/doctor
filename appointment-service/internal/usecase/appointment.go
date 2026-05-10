@@ -4,8 +4,10 @@ import (
 	"context"
 	"time"
 
+	"appointment-service/internal/cache"
 	"appointment-service/internal/event"
 	"appointment-service/internal/model"
+	"log"
 
 	"github.com/google/uuid"
 )
@@ -52,6 +54,7 @@ type AppointmentStatusUpdatedEvent struct {
 	EventType  string       `json:"event_type"`
 	OccurredAt string       `json:"occurred_at"`
 	ID         string       `json:"id"`
+	DoctorID   string       `json:"doctor_id"`
 	OldStatus  model.Status `json:"old_status"`
 	NewStatus  model.Status `json:"new_status"`
 }
@@ -61,14 +64,16 @@ type appointmentUsecase struct {
 	doctorChecker DoctorVerifier
 	logger        Logger
 	publisher     event.EventPublisher
+	cache         cache.CacheRepository
 }
 
-func NewAppointmentUsecase(repo AppointmentRepository, doctorChecker DoctorVerifier, logger Logger, publisher event.EventPublisher) AppointmentUsecase {
+func NewAppointmentUsecase(repo AppointmentRepository, doctorChecker DoctorVerifier, logger Logger, publisher event.EventPublisher, cache cache.CacheRepository) AppointmentUsecase {
 	return &appointmentUsecase{
 		repo:          repo,
 		doctorChecker: doctorChecker,
 		logger:        logger,
 		publisher:     publisher,
+		cache:         cache,
 	}
 }
 
@@ -98,26 +103,70 @@ func (u *appointmentUsecase) Create(ctx context.Context, input CreateAppointment
 	created, err := u.repo.WithTx(ctx, func(repo AppointmentRepository) (model.Appointment, error) {
 		return repo.Create(ctx, appointment)
 	})
-	if err == nil && u.publisher != nil {
-		_ = u.publisher.Publish(ctx, "appointments.created", AppointmentCreatedEvent{
-			EventType:  "appointments.created",
-			OccurredAt: time.Now().Format(time.RFC3339),
-			ID:         created.ID.String(),
-			Title:      created.Title,
-			DoctorID:   created.DoctorID.String(),
-			Status:     created.Status,
-		})
+	if err == nil {
+		if u.publisher != nil {
+			_ = u.publisher.Publish(ctx, "appointments.created", AppointmentCreatedEvent{
+				EventType:  "appointments.created",
+				OccurredAt: time.Now().Format(time.RFC3339),
+				ID:         created.ID.String(),
+				Title:      created.Title,
+				DoctorID:   created.DoctorID.String(),
+				Status:     created.Status,
+			})
+		}
+		// Write-Around: invalidate list key
+		if u.cache != nil {
+			if err := u.cache.InvalidateAppointmentsList(ctx); err != nil {
+				log.Printf("Cache invalidation error: %v", err)
+			}
+		}
 	}
 
 	return created, err
 }
 
 func (u *appointmentUsecase) GetByID(ctx context.Context, id uuid.UUID) (model.Appointment, error) {
-	return u.repo.GetByID(ctx, id)
+	if u.cache != nil {
+		if cached, err := u.cache.GetAppointment(ctx, id.String()); err == nil && cached != nil {
+			return *cached, nil
+		} else if err != nil {
+			log.Printf("Cache get error: %v", err)
+		}
+	}
+
+	appt, err := u.repo.GetByID(ctx, id)
+	if err == nil && u.cache != nil {
+		if err := u.cache.SetAppointment(ctx, &appt); err != nil {
+			log.Printf("Cache set error: %v", err)
+		}
+	}
+	return appt, err
 }
 
 func (u *appointmentUsecase) List(ctx context.Context) ([]model.Appointment, error) {
-	return u.repo.List(ctx)
+	if u.cache != nil {
+		if cached, err := u.cache.GetAppointmentsList(ctx); err == nil && cached != nil {
+			appts := make([]model.Appointment, len(cached))
+			for i, v := range cached {
+				appts[i] = *v
+			}
+			return appts, nil
+		} else if err != nil {
+			log.Printf("Cache list error: %v", err)
+		}
+	}
+
+	appts, err := u.repo.List(ctx)
+	if err == nil && u.cache != nil {
+		ptrAppts := make([]*model.Appointment, len(appts))
+		for i := range appts {
+			ptrAppts[i] = &appts[i]
+		}
+		if err := u.cache.SetAppointmentsList(ctx, ptrAppts); err != nil {
+			log.Printf("Cache list set error: %v", err)
+		}
+	}
+	return appts, err
 }
 
 func (u *appointmentUsecase) UpdateStatus(ctx context.Context, id uuid.UUID, status model.Status) (model.Appointment, error) {
@@ -145,14 +194,26 @@ func (u *appointmentUsecase) UpdateStatus(ctx context.Context, id uuid.UUID, sta
 		appointment.UpdatedAt = time.Now().UTC()
 		return repo.Update(ctx, appointment)
 	})
-	if err == nil && u.publisher != nil {
-		_ = u.publisher.Publish(ctx, "appointments.status_updated", AppointmentStatusUpdatedEvent{
-			EventType:  "appointments.status_updated",
-			OccurredAt: time.Now().Format(time.RFC3339),
-			ID:         updated.ID.String(),
-			OldStatus:  oldStatus,
-			NewStatus:  updated.Status,
-		})
+	if err == nil {
+		if u.publisher != nil {
+			_ = u.publisher.Publish(ctx, "appointments.status_updated", AppointmentStatusUpdatedEvent{
+				EventType:  "appointments.status_updated",
+				OccurredAt: time.Now().Format(time.RFC3339),
+				ID:         updated.ID.String(),
+				DoctorID:   updated.DoctorID.String(),
+				OldStatus:  oldStatus,
+				NewStatus:  updated.Status,
+			})
+		}
+		// Write-Through: update individual key and invalidate list key
+		if u.cache != nil {
+			if err := u.cache.SetAppointment(ctx, &updated); err != nil {
+				log.Printf("Cache update error: %v", err)
+			}
+			if err := u.cache.InvalidateAppointmentsList(ctx); err != nil {
+				log.Printf("Cache invalidation error: %v", err)
+			}
+		}
 	}
 
 	return updated, err

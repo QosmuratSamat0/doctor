@@ -4,8 +4,10 @@ import (
 	"context"
 	"time"
 
+	"doctor-service/internal/cache"
 	"doctor-service/internal/event"
 	"doctor-service/internal/model"
+	"log"
 
 	"github.com/google/uuid"
 )
@@ -42,10 +44,11 @@ type DoctorCreatedEvent struct {
 type doctorUsecase struct {
 	repo      DoctorRepository
 	publisher event.EventPublisher
+	cache     cache.CacheRepository
 }
 
-func NewDoctorUsecase(repo DoctorRepository, publisher event.EventPublisher) DoctorUsecase {
-	return &doctorUsecase{repo: repo, publisher: publisher}
+func NewDoctorUsecase(repo DoctorRepository, publisher event.EventPublisher, cache cache.CacheRepository) DoctorUsecase {
+	return &doctorUsecase{repo: repo, publisher: publisher, cache: cache}
 }
 
 func (u *doctorUsecase) Create(ctx context.Context, input CreateDoctorInput) (model.Doctor, error) {
@@ -72,24 +75,68 @@ func (u *doctorUsecase) Create(ctx context.Context, input CreateDoctorInput) (mo
 
 		return repo.Create(ctx, doctor)
 	})
-	if err == nil && u.publisher != nil {
-		_ = u.publisher.Publish(ctx, "doctors.created", DoctorCreatedEvent{
-			EventType:      "doctors.created",
-			OccurredAt:     time.Now().Format(time.RFC3339),
-			ID:             created.ID.String(),
-			FullName:       created.FullName,
-			Specialization: created.Specialization,
-			Email:          created.Email,
-		})
+	if err == nil {
+		if u.publisher != nil {
+			_ = u.publisher.Publish(ctx, "doctors.created", DoctorCreatedEvent{
+				EventType:      "doctors.created",
+				OccurredAt:     time.Now().Format(time.RFC3339),
+				ID:             created.ID.String(),
+				FullName:       created.FullName,
+				Specialization: created.Specialization,
+				Email:          created.Email,
+			})
+		}
+		// Invalidate list key (Write-Through as per prompt, though it says invalidate)
+		if u.cache != nil {
+			if err := u.cache.InvalidateDoctorsList(ctx); err != nil {
+				log.Printf("Cache invalidation error: %v", err)
+			}
+		}
 	}
 
 	return created, err
 }
 
 func (u *doctorUsecase) GetByID(ctx context.Context, id uuid.UUID) (model.Doctor, error) {
-	return u.repo.GetByID(ctx, id)
+	if u.cache != nil {
+		if cached, err := u.cache.GetDoctor(ctx, id.String()); err == nil && cached != nil {
+			return *cached, nil
+		} else if err != nil {
+			log.Printf("Cache get error: %v", err)
+		}
+	}
+
+	doc, err := u.repo.GetByID(ctx, id)
+	if err == nil && u.cache != nil {
+		if err := u.cache.SetDoctor(ctx, &doc); err != nil {
+			log.Printf("Cache set error: %v", err)
+		}
+	}
+	return doc, err
 }
 
 func (u *doctorUsecase) List(ctx context.Context) ([]model.Doctor, error) {
-	return u.repo.List(ctx)
+	if u.cache != nil {
+		if cached, err := u.cache.GetDoctorsList(ctx); err == nil && cached != nil {
+			docs := make([]model.Doctor, len(cached))
+			for i, v := range cached {
+				docs[i] = *v
+			}
+			return docs, nil
+		} else if err != nil {
+			log.Printf("Cache list error: %v", err)
+		}
+	}
+
+	docs, err := u.repo.List(ctx)
+	if err == nil && u.cache != nil {
+		ptrDocs := make([]*model.Doctor, len(docs))
+		for i := range docs {
+			ptrDocs[i] = &docs[i]
+		}
+		if err := u.cache.SetDoctorsList(ctx, ptrDocs); err != nil {
+			log.Printf("Cache list set error: %v", err)
+		}
+	}
+	return docs, err
 }
