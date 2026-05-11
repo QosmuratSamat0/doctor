@@ -27,7 +27,12 @@ import (
 )
 
 func Run() error {
-	_ = godotenv.Load()
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Printf("Info: godotenv.Load() skipped or failed: %v (using system environment variables)\n", err)
+	} else {
+		fmt.Println("Successfully loaded .env file")
+	}
 	ctx := context.Background()
 
 	grpcPort := os.Getenv("GRPC_PORT")
